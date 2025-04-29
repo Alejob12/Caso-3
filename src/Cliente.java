@@ -37,6 +37,19 @@ public class Cliente {
             byte[] firmaReto = new byte[sigLen];
             dis.readFully(firmaReto);
 
+            // ✅ 1. Medir tiempo de verificación de la firma del reto
+            final byte[] retoFinal = reto;
+            final byte[] firmaRetoFinal = firmaReto;
+            long tiempoVerificacion = MedidorTiempos.medirVerificacion(() -> {
+                try {
+                    firma.verify(retoFinal, firmaRetoFinal);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            });
+            System.out.println("[Cliente] Tiempo de verificación de firma: " + tiempoVerificacion + " ns (" +
+                    (tiempoVerificacion / 1_000_000.0) + " ms)");
+
             boolean ok = firma.verify(reto, firmaReto);
             dos.writeUTF(ok ? "OK" : "ERROR");
             dos.flush();
@@ -60,9 +73,24 @@ public class Cliente {
             byte[] hmacRecv = new byte[hmLen];
             pdip.readFully(hmacRecv);
 
-            Cipher c = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            c.init(Cipher.DECRYPT_MODE, sk.getEncryptionKey(), new IvParameterSpec(iv));
-            byte[] tablaBytes = c.doFinal(ct);
+            // ✅ 2. Medir tiempo de descifrado de la tabla de servicios
+            final Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            final IvParameterSpec ivSpec = new IvParameterSpec(iv);
+            final byte[] ctFinal = ct;
+            final byte[][] tablaBytesHolder = new byte[1][];
+
+            long tiempoDescifrado = MedidorTiempos.medirCifrado(() -> {
+                try {
+                    cipher.init(Cipher.DECRYPT_MODE, sk.getEncryptionKey(), ivSpec);
+                    tablaBytesHolder[0] = cipher.doFinal(ctFinal);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            });
+            System.out.println("[Cliente] Tiempo de descifrado de tabla: " + tiempoDescifrado + " ns (" +
+                    (tiempoDescifrado / 1_000_000.0) + " ms)");
+
+            byte[] tablaBytes = tablaBytesHolder[0];
 
             byte[] hmacCalc = UtilidadesProtocolo.hmac(sk.getHmacKey(), tablaBytes);
             if (!java.security.MessageDigest.isEqual(hmacCalc, hmacRecv)) {
@@ -87,7 +115,6 @@ public class Cliente {
             byte[] response = UtilidadesProtocolo.receiveBytes(socket);
             byte[] plain = UtilidadesProtocolo.decryptAndVerify(response, sk);
             System.out.println("Respuesta: " + new String(plain));
-
         }
     }
 }
