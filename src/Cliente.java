@@ -37,7 +37,6 @@ public class Cliente {
             byte[] firmaReto = new byte[sigLen];
             dis.readFully(firmaReto);
 
-            // ✅ 1. Medir tiempo de verificación de la firma del reto
             final byte[] retoFinal = reto;
             final byte[] firmaRetoFinal = firmaReto;
             long tiempoVerificacion = MedidorTiempos.medirVerificacion(() -> {
@@ -73,7 +72,6 @@ public class Cliente {
             byte[] hmacRecv = new byte[hmLen];
             pdip.readFully(hmacRecv);
 
-            // ✅ 2. Medir tiempo de descifrado de la tabla de servicios
             final Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
             final IvParameterSpec ivSpec = new IvParameterSpec(iv);
             final byte[] ctFinal = ct;
