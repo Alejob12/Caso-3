@@ -1,43 +1,81 @@
 import java.net.Socket;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.ByteArrayInputStream;
 import java.security.PublicKey;
 import java.util.Map;
 import java.util.Scanner;
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
 
 public class Cliente {
 
     public static void main(String[] args) throws Exception {
-        String host          = args.length > 0 ? args[0] : "localhost";
-        int port             = args.length > 1 ? Integer.parseInt(args[1]) : 5000;
+        String host = args.length > 0 ? args[0] : "localhost";
+        int port = args.length > 1 ? Integer.parseInt(args[1]) : 5000;
         String publicKeyPath = args.length > 2 ? args[2] : "llave_publica.der";
 
-        // <-- Aquí pasa primero null (no hay privada) y luego la ruta de la pública:
         GestorLlaves gestor = new GestorLlaves(null, publicKeyPath);
         PublicKey serverPub = gestor.getPublicKey();
-        FirmaDigital firma  = new FirmaDigital(null, serverPub);
+        FirmaDigital firma = new FirmaDigital(null, serverPub);
 
-        try (Socket socket = new Socket(host, port)) {
-            UtilidadesProtocolo.SessionKeys sk =
-                    UtilidadesProtocolo.performKeyExchangeAsClient(socket);
+        try (Socket socket = new Socket(host, port);
+             DataInputStream dis = new DataInputStream(socket.getInputStream());
+             DataOutputStream dos = new DataOutputStream(socket.getOutputStream())) {
 
-            byte[] signedEncryptedTable = UtilidadesProtocolo.receiveBytes(socket);
-            UtilidadesProtocolo.SignedMessage signedMsg =
-                    UtilidadesProtocolo.parseSignedMessage(signedEncryptedTable);
+            socket.setSoTimeout(10000);
 
-            if (!firma.verify(signedMsg.getCipherText(), signedMsg.getSignature())) {
+            System.out.println("[Cliente] Conectado a " + host + ":" + port);
+            dos.writeUTF("HELLO");
+            dos.flush();
+
+            int retoLen = dis.readInt();
+            byte[] reto = new byte[retoLen];
+            dis.readFully(reto);
+
+            int sigLen = dis.readInt();
+            byte[] firmaReto = new byte[sigLen];
+            dis.readFully(firmaReto);
+
+            boolean ok = firma.verify(reto, firmaReto);
+            dos.writeUTF(ok ? "OK" : "ERROR");
+            dos.flush();
+            if (!ok) return;
+
+            UtilidadesProtocolo.SessionKeys sk = UtilidadesProtocolo.performKeyExchangeAsClient(socket);
+
+            System.out.println("[Cliente] Esperando tabla de servicios");
+            byte[] tablePayload = UtilidadesProtocolo.receiveBytes(socket);
+            DataInputStream pdip = new DataInputStream(new ByteArrayInputStream(tablePayload));
+
+            int ivLen = pdip.readInt();
+            byte[] iv = new byte[ivLen];
+            pdip.readFully(iv);
+
+            int ctLen = pdip.readInt();
+            byte[] ct = new byte[ctLen];
+            pdip.readFully(ct);
+
+            int hmLen = pdip.readInt();
+            byte[] hmacRecv = new byte[hmLen];
+            pdip.readFully(hmacRecv);
+
+            Cipher c = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            c.init(Cipher.DECRYPT_MODE, sk.getEncryptionKey(), new IvParameterSpec(iv));
+            byte[] tablaBytes = c.doFinal(ct);
+
+            byte[] hmacCalc = UtilidadesProtocolo.hmac(sk.getHmacKey(), tablaBytes);
+            if (!java.security.MessageDigest.isEqual(hmacCalc, hmacRecv)) {
                 System.err.println("Error en la consulta");
                 return;
             }
 
-            byte[] tableBytes = UtilidadesProtocolo.decryptAES(
-                    signedMsg.getCipherText(), sk.getEncryptionKey(), signedMsg.getIv()
-            );
-            TablaServicios tabla = UtilidadesProtocolo.deserializeTable(tableBytes);
-
+            TablaServicios tabla = UtilidadesProtocolo.deserializeTable(tablaBytes);
             System.out.println("Servicios disponibles:");
-            tabla.listarServicios()
-                    .forEach((id, nombre) -> System.out.println(id + ": " + nombre));
+            tabla.listarServicios().forEach((id, nombre) -> System.out.println(id + ": " + nombre));
 
             Scanner sc = new Scanner(System.in);
+            System.out.print("Seleccione servicio ID: ");
             int idServicio = sc.nextInt();
 
             byte[] request = UtilidadesProtocolo.encryptAndHmac(
@@ -45,9 +83,11 @@ public class Cliente {
             );
             UtilidadesProtocolo.sendBytes(socket, request);
 
+            System.out.println("[Cliente] Esperando respuesta del servidor");
             byte[] response = UtilidadesProtocolo.receiveBytes(socket);
             byte[] plain = UtilidadesProtocolo.decryptAndVerify(response, sk);
-            System.out.println(new String(plain));
+            System.out.println("Respuesta: " + new String(plain));
+
         }
     }
 }

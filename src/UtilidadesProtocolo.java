@@ -170,4 +170,12 @@ public class UtilidadesProtocolo {
         ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(bytes));
         return (TablaServicios) ois.readObject();
     }
+
+    public static byte[] hmac(SecretKey macKey, byte[] data) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(macKey);
+        return mac.doFinal(data);
+    }
+
+
 }
