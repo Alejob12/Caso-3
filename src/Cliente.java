@@ -19,100 +19,108 @@ public class Cliente {
         PublicKey serverPub = gestor.getPublicKey();
         FirmaDigital firma = new FirmaDigital(null, serverPub);
 
-        try (Socket socket = new Socket(host, port);
-             DataInputStream dis = new DataInputStream(socket.getInputStream());
-             DataOutputStream dos = new DataOutputStream(socket.getOutputStream())) {
+        // Bucle para realizar 32 consultas secuenciales
+        for (int consulta = 0; consulta < 32; consulta++) {
+            System.out.println("\n[Cliente] Iniciando consulta #" + (consulta+1) + " de 32");
 
-            socket.setSoTimeout(10000);
+            try (Socket socket = new Socket(host, port);
+                 DataInputStream dis = new DataInputStream(socket.getInputStream());
+                 DataOutputStream dos = new DataOutputStream(socket.getOutputStream())) {
 
-            System.out.println("[Cliente] Conectado a " + host + ":" + port);
-            dos.writeUTF("HELLO");
-            dos.flush();
+                socket.setSoTimeout(10000);
 
-            int retoLen = dis.readInt();
-            byte[] reto = new byte[retoLen];
-            dis.readFully(reto);
+                System.out.println("[Cliente] Conectado a " + host + ":" + port);
+                dos.writeUTF("HELLO");
+                dos.flush();
 
-            int sigLen = dis.readInt();
-            byte[] firmaReto = new byte[sigLen];
-            dis.readFully(firmaReto);
+                int retoLen = dis.readInt();
+                byte[] reto = new byte[retoLen];
+                dis.readFully(reto);
 
-            final byte[] retoFinal = reto;
-            final byte[] firmaRetoFinal = firmaReto;
-            long tiempoVerificacion = MedidorTiempos.medirVerificacion(() -> {
-                try {
-                    firma.verify(retoFinal, firmaRetoFinal);
-                } catch (Exception e) {
-                    e.printStackTrace();
+                int sigLen = dis.readInt();
+                byte[] firmaReto = new byte[sigLen];
+                dis.readFully(firmaReto);
+
+                final byte[] retoFinal = reto;
+                final byte[] firmaRetoFinal = firmaReto;
+                long tiempoVerificacion = MedidorTiempos.medirVerificacion(() -> {
+                    try {
+                        firma.verify(retoFinal, firmaRetoFinal);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                });
+                System.out.println("[Cliente] Tiempo de verificación de firma: " + tiempoVerificacion + " ns (" +
+                        (tiempoVerificacion / 1_000_000.0) + " ms)");
+
+                boolean ok = firma.verify(reto, firmaReto);
+                dos.writeUTF(ok ? "OK" : "ERROR");
+                dos.flush();
+                if (!ok) continue; // Cambiado de 'return' a 'continue' para seguir con la siguiente iteración
+
+                UtilidadesProtocolo.SessionKeys sk = UtilidadesProtocolo.performKeyExchangeAsClient(socket);
+
+                System.out.println("[Cliente] Esperando tabla de servicios");
+                byte[] tablePayload = UtilidadesProtocolo.receiveBytes(socket);
+                DataInputStream pdip = new DataInputStream(new ByteArrayInputStream(tablePayload));
+
+                int ivLen = pdip.readInt();
+                byte[] iv = new byte[ivLen];
+                pdip.readFully(iv);
+
+                int ctLen = pdip.readInt();
+                byte[] ct = new byte[ctLen];
+                pdip.readFully(ct);
+
+                int hmLen = pdip.readInt();
+                byte[] hmacRecv = new byte[hmLen];
+                pdip.readFully(hmacRecv);
+
+                final Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+                final IvParameterSpec ivSpec = new IvParameterSpec(iv);
+                final byte[] ctFinal = ct;
+                final byte[][] tablaBytesHolder = new byte[1][];
+
+                long tiempoDescifrado = MedidorTiempos.medirCifrado(() -> {
+                    try {
+                        cipher.init(Cipher.DECRYPT_MODE, sk.getEncryptionKey(), ivSpec);
+                        tablaBytesHolder[0] = cipher.doFinal(ctFinal);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                });
+                System.out.println("[Cliente] Tiempo de descifrado de tabla: " + tiempoDescifrado + " ns (" +
+                        (tiempoDescifrado / 1_000_000.0) + " ms)");
+
+                byte[] tablaBytes = tablaBytesHolder[0];
+
+                byte[] hmacCalc = UtilidadesProtocolo.hmac(sk.getHmacKey(), tablaBytes);
+                if (!java.security.MessageDigest.isEqual(hmacCalc, hmacRecv)) {
+                    System.err.println("Error en la consulta");
+                    continue; // Cambiado de 'return' a 'continue' para seguir con la siguiente iteración
                 }
-            });
-            System.out.println("[Cliente] Tiempo de verificación de firma: " + tiempoVerificacion + " ns (" +
-                    (tiempoVerificacion / 1_000_000.0) + " ms)");
 
-            boolean ok = firma.verify(reto, firmaReto);
-            dos.writeUTF(ok ? "OK" : "ERROR");
-            dos.flush();
-            if (!ok) return;
+                TablaServicios tabla = UtilidadesProtocolo.deserializeTable(tablaBytes);
+                System.out.println("Servicios disponibles:");
+                tabla.listarServicios().forEach((id, nombre) -> System.out.println(id + ": " + nombre));
 
-            UtilidadesProtocolo.SessionKeys sk = UtilidadesProtocolo.performKeyExchangeAsClient(socket);
+                Scanner sc = new Scanner(System.in);
+                System.out.print("Seleccione servicio ID: ");
+                int idServicio = sc.nextInt();
 
-            System.out.println("[Cliente] Esperando tabla de servicios");
-            byte[] tablePayload = UtilidadesProtocolo.receiveBytes(socket);
-            DataInputStream pdip = new DataInputStream(new ByteArrayInputStream(tablePayload));
+                byte[] request = UtilidadesProtocolo.encryptAndHmac(
+                        String.valueOf(idServicio).getBytes(), sk
+                );
+                UtilidadesProtocolo.sendBytes(socket, request);
 
-            int ivLen = pdip.readInt();
-            byte[] iv = new byte[ivLen];
-            pdip.readFully(iv);
-
-            int ctLen = pdip.readInt();
-            byte[] ct = new byte[ctLen];
-            pdip.readFully(ct);
-
-            int hmLen = pdip.readInt();
-            byte[] hmacRecv = new byte[hmLen];
-            pdip.readFully(hmacRecv);
-
-            final Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            final IvParameterSpec ivSpec = new IvParameterSpec(iv);
-            final byte[] ctFinal = ct;
-            final byte[][] tablaBytesHolder = new byte[1][];
-
-            long tiempoDescifrado = MedidorTiempos.medirCifrado(() -> {
-                try {
-                    cipher.init(Cipher.DECRYPT_MODE, sk.getEncryptionKey(), ivSpec);
-                    tablaBytesHolder[0] = cipher.doFinal(ctFinal);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            });
-            System.out.println("[Cliente] Tiempo de descifrado de tabla: " + tiempoDescifrado + " ns (" +
-                    (tiempoDescifrado / 1_000_000.0) + " ms)");
-
-            byte[] tablaBytes = tablaBytesHolder[0];
-
-            byte[] hmacCalc = UtilidadesProtocolo.hmac(sk.getHmacKey(), tablaBytes);
-            if (!java.security.MessageDigest.isEqual(hmacCalc, hmacRecv)) {
-                System.err.println("Error en la consulta");
-                return;
+                System.out.println("[Cliente] Esperando respuesta del servidor");
+                byte[] response = UtilidadesProtocolo.receiveBytes(socket);
+                byte[] plain = UtilidadesProtocolo.decryptAndVerify(response, sk);
+                System.out.println("Respuesta: " + new String(plain));
+            } catch (Exception e) {
+                System.err.println("[Cliente] Error en la consulta #" + (consulta+1) + ": " + e.getMessage());
+                e.printStackTrace();
             }
-
-            TablaServicios tabla = UtilidadesProtocolo.deserializeTable(tablaBytes);
-            System.out.println("Servicios disponibles:");
-            tabla.listarServicios().forEach((id, nombre) -> System.out.println(id + ": " + nombre));
-
-            Scanner sc = new Scanner(System.in);
-            System.out.print("Seleccione servicio ID: ");
-            int idServicio = sc.nextInt();
-
-            byte[] request = UtilidadesProtocolo.encryptAndHmac(
-                    String.valueOf(idServicio).getBytes(), sk
-            );
-            UtilidadesProtocolo.sendBytes(socket, request);
-
-            System.out.println("[Cliente] Esperando respuesta del servidor");
-            byte[] response = UtilidadesProtocolo.receiveBytes(socket);
-            byte[] plain = UtilidadesProtocolo.decryptAndVerify(response, sk);
-            System.out.println("Respuesta: " + new String(plain));
         }
     }
 }

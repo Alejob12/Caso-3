@@ -12,104 +12,109 @@ public class ServidorDelegado implements Runnable {
     private Socket socket;
     private TablaServicios tabla;
     private GestorLlaves gestor;
+    private String escenario;
+    private String modo;
 
-    public ServidorDelegado(Socket socket, TablaServicios tabla, GestorLlaves gestor) {
-        this.socket = socket;
-        this.tabla = tabla;
-        this.gestor = gestor;
+    public ServidorDelegado(
+            Socket socket,
+            TablaServicios tabla,
+            GestorLlaves gestor,
+            String escenario,
+            String modo
+    ) {
+        this.socket     = socket;
+        this.tabla      = tabla;
+        this.gestor     = gestor;
+        this.escenario  = escenario;
+        this.modo       = modo;
     }
 
     @Override
     public void run() {
+        long tStartTotal = System.currentTimeMillis();
+        long tiempoFirma = 0, tiempoCifrado = 0, tiempoVerificacion = 0;
+
         try (
-                DataInputStream dis = new DataInputStream(socket.getInputStream());
+                DataInputStream dis  = new DataInputStream(socket.getInputStream());
                 DataOutputStream dos = new DataOutputStream(socket.getOutputStream())
         ) {
             String saludo = dis.readUTF();
-            if (!"HELLO".equals(saludo)) {
-                socket.close();
-                return;
-            }
+            if (!"HELLO".equals(saludo)) return;
+
             byte[] reto = new byte[32];
             new SecureRandom().nextBytes(reto);
             FirmaDigital firmaR = new FirmaDigital(gestor.getPrivateKey(), gestor.getPublicKey());
-
-            // Medir el tiempo de firma del reto
-            final byte[] retoFinal = reto;
-            long tiempoFirma = MedidorTiempos.medirFirma(() -> {
-                try {
-                    firmaR.sign(retoFinal);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
+            final byte[] retoF = reto;
+            tiempoFirma = MedidorTiempos.medirFirma(() -> {
+                try { firmaR.sign(retoF); } catch(Exception ignored){}
             });
-
-            // Realizar la firma real (no duplicada)
             byte[] retoFirmado = firmaR.sign(reto);
-
-            System.out.println("Tiempo de firma del reto: " + tiempoFirma + " ns");
 
             dos.writeInt(reto.length);
             dos.write(reto);
             dos.writeInt(retoFirmado.length);
             dos.write(retoFirmado);
             dos.flush();
-            String respuesta = dis.readUTF();
-            if (!"OK".equals(respuesta)) {
-                socket.close();
-                return;
-            }
+
+            String resp = dis.readUTF();
+            if (!"OK".equals(resp)) return;
+
             UtilidadesProtocolo.SessionKeys sk = UtilidadesProtocolo.performKeyExchangeAsServer(socket);
             byte[] tablaBytes = tabla.serializar();
             byte[] iv = new byte[16];
             new SecureRandom().nextBytes(iv);
-            Cipher cifrador = Cipher.getInstance("AES/CBC/PKCS5Padding");
+            Cipher cif = Cipher.getInstance("AES/CBC/PKCS5Padding");
 
-            // Medir el tiempo de cifrado de la tabla de servicios
-            final byte[] tablaBytesFinales = tablaBytes;
-            final IvParameterSpec ivSpec = new IvParameterSpec(iv);
-            final Cipher cifradorFinal = cifrador;
-            final javax.crypto.SecretKey claveEncriptacion = sk.getEncryptionKey();
-
-            long tiempoCifrado = MedidorTiempos.medirCifrado(() -> {
+            final byte[] tb = tablaBytes;
+            final IvParameterSpec ivs = new IvParameterSpec(iv);
+            final Cipher cf = cif;
+            final javax.crypto.SecretKey keyEnc = sk.getEncryptionKey();
+            tiempoCifrado = MedidorTiempos.medirCifrado(() -> {
                 try {
-                    cifradorFinal.init(Cipher.ENCRYPT_MODE, claveEncriptacion, ivSpec);
-                    cifradorFinal.doFinal(tablaBytesFinales);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
+                    cf.init(Cipher.ENCRYPT_MODE, keyEnc, ivs);
+                    cf.doFinal(tb);
+                } catch(Exception ignored){}
             });
 
-            System.out.println("Tiempo de cifrado de la tabla de servicios: " + tiempoCifrado + " ns");
-
-            // Inicializar de nuevo el cifrador y realizar la operación real
-            cifrador.init(Cipher.ENCRYPT_MODE, sk.getEncryptionKey(), new IvParameterSpec(iv));
-            byte[] ct = cifrador.doFinal(tablaBytes);
-
+            cif.init(Cipher.ENCRYPT_MODE, keyEnc, new IvParameterSpec(iv));
+            byte[] ct = cif.doFinal(tablaBytes);
             byte[] hmac = UtilidadesProtocolo.hmac(sk.getHmacKey(), tablaBytes);
+
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             DataOutputStream pdos = new DataOutputStream(bos);
-            pdos.writeInt(iv.length);
-            pdos.write(iv);
-            pdos.writeInt(ct.length);
-            pdos.write(ct);
-            pdos.writeInt(hmac.length);
-            pdos.write(hmac);
+            pdos.writeInt(iv.length); pdos.write(iv);
+            pdos.writeInt(ct.length); pdos.write(ct);
+            pdos.writeInt(hmac.length); pdos.write(hmac);
             pdos.flush();
             UtilidadesProtocolo.sendBytes(socket, bos.toByteArray());
-            byte[] reqPayload = UtilidadesProtocolo.receiveBytes(socket);
-            byte[] plain = UtilidadesProtocolo.decryptAndVerify(reqPayload, sk);
-            int id = Integer.parseInt(new String(plain));
-            TablaServicios.Servicio serv = tabla.getServicio(id);
-            String resp = serv != null ? serv.getIp() + "," + serv.getPuerto() : "-1,-1";
-            byte[] respPayload = UtilidadesProtocolo.encryptAndHmac(resp.getBytes(), sk);
-            UtilidadesProtocolo.sendBytes(socket, respPayload);
+
+            byte[] req = UtilidadesProtocolo.receiveBytes(socket);
+            tiempoVerificacion = MedidorTiempos.medirVerificacion(() -> {
+                try { UtilidadesProtocolo.decryptAndVerify(req, sk); }
+                catch(Exception ignored){}
+            });
+
+            int id = Integer.parseInt(new String(UtilidadesProtocolo.decryptAndVerify(req, sk)));
+            TablaServicios.Servicio s = tabla.getServicio(id);
+            String out = s != null ? s.getIp()+","+s.getPuerto() : "-1,-1";
+            UtilidadesProtocolo.sendBytes(socket, UtilidadesProtocolo.encryptAndHmac(out.getBytes(), sk));
+
         } catch (Exception e) {
-            System.err.println("Error en la consulta");
         } finally {
+            long tEndTotal = System.currentTimeMillis();
+            long totalMs = tEndTotal - tStartTotal;
             try {
-                socket.close();
+                CSVRecorder.log(
+                        escenario,
+                        modo,
+                        socket.getPort(),
+                        tiempoFirma,
+                        tiempoCifrado,
+                        tiempoVerificacion,
+                        totalMs
+                );
             } catch (IOException ignored) {}
+            try { socket.close(); } catch(IOException ignored){}
         }
     }
 }
